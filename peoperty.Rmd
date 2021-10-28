@@ -1,0 +1,876 @@
+---
+title: "NYC Property Sale Price Predictor"
+author: "Donghan Lee"
+date: "10/27/2021"
+output: html_document
+---
+
+## Introduction
+
+The prediction of price on an asset is of keen interest. Particularly, real estate price is related more-or-less to people's life. Who don't want to live in a cozy house? Thus, I have searched data set for machine learning to build a price predictor. I have found *"NYC Property Sales"* data in Kaggle webpage, which is *"A year's worth of properties sold on the NYC real estate market"* according to the webpage. The source of data is City of New York and the last update is 4 years ago. According to the webpage, the data contains all the building unit sold in NYC property market over a 12 month period.
+
+**Variables**
+
+The contents of the data include 22 variables such as sale price, address, unit type, borough, square feet, and so on.
+
+**Goal** 
+
+Using the data, I will make a price predictor.
+
+*Flow*
+
+1. data acquisition.
+2. data analysis and build a clean data.
+3. training and test sets creation
+4. simulation of three different methods.
+* Naive approach
+  * the expected price is the average
+* regression tree model (rpart)
+* k-nearest neighbors (kNN) algorithm
+
+##Methos/analysis
+
+Due to the authorizing issue (needs login), a zip file was downloaded from "https://www.kaggle.com/new-york-city/nyc-property-sales" and unziped to "nyc-rolling-sales.csv"
+
+**libraries loading**
+
+```{r message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+library(knitr)
+```
+
+**Benchmark RMSE function**
+Root Mean Square Error is defined as follows:
+
+$$
+RMSE = \sqrt{\frac{1}{N} \sum_{u,i}(\hat{y_{u,i}} - y_{u,i})^2}
+$$
+
+where $\hat{y_{u,i}}$ and $y_{u,i}$ are predicted and actul values. This RMSE is used as the Benchmark.
+
+```{r}
+RMSE <- function(predictions, true_ratings){
+  sqrt(mean((true_ratings - predictions)^2))
+}
+```
+
+After inspecting the file, I found that the delimiter is ",". Thus, tidyverse::read_csv() is used and assigned to sale.
+
+```{r message=FALSE}
+sale <- read_csv("nyc-rolling-sales.csv")
+```
+
+Data consists of row: 84548  and column: 22.
+
+**Inspection of data**
+
+```{r}
+head(sale)
+tail(sale)
+str(sale)
+names(sale)
+```
+
+Data contains 22 columns.
+* "...1" : property index, double
+* "BOROUGH" : administration district, double
+* "NEIGHBORHOOD" : neighborhodd name, chr
+* "BUILDING CLASS CATEGORY" : what kind of property, chr
+* "TAX CLASS AT PRESENT" : tax category, chr
+* "BLOCK" : double                        
+* "LOT" : double
+* "EASE-MENT" : logical                   
+* "BUILDING CLASS AT PRESENT" : chr
+* "ADDRESS" : chr                       
+* "APARTMENT NUMBER" : chr
+* "ZIP CODE" : double                 
+* "RESIDENTIAL UNITS" : double
+* "COMMERCIAL UNITS" : double       
+* "TOTAL UNITS" : double
+* "LAND SQUARE FEET" : chr
+* "GROSS SQUARE FEET" : chr
+* "YEAR BUILT" : double                  
+* "TAX CLASS AT TIME OF SALE" : double
+* "BUILDING CLASS AT TIME OF SALE" : chr
+* "SALE PRICE" : chr
+* "SALE DATE" : POSIXct
+
+## Data cleaning
+
+**SALE PRICE** is what I want to predict and name is changed to price.
+
+```{r}
+price <- sale["SALE PRICE"] 
+n_distinct(price)
+```
+
+Price contains unique 10008 values.
+
+*contents inspection*
+
+```{r}
+head(price)
+```
+
+Price contians "-".  "-" is replaced with the average value of prices. price variables are changed to numeric.
+Both can be achieved with as.numberic().
+
+```{r, message=FALSE, warning=FALSE}
+price <- as.numeric(t(price))
+
+# replace NA with the average.
+
+mprice <- round(mean(price, na.rm = T), digits = 0)
+
+price <- sapply(price, function(l) {
+  ifelse(!is.na(l), l, mprice)
+})
+```
+
+*price is rounded to 10^4*
+
+```{r}
+price <- round(price, digits = -4)
+```
+
+*price is collected to dat.*
+
+```{r}
+dat <- data.frame(price = price)
+```
+
+"...1" is the index for property, propId.
+
+```{r}
+propId <- sale["...1"]
+
+n_distinct(propId)
+```
+
+propId has unique 26736 values. It is over our price number.
+Thus, we don't need this.
+
+*"BOROUGH"* administration district, double --> borough, chr
+according to
+"A Property's Borough, Block and Lot Number". NYC.gov. City of New York.
+ 1. Manhattan (New York County)
+ 2. Bronx (Bronx County)
+ 3. Brooklyn (Kings County)
+ 4. Queens (Queens County)
+ 5. Staten Island (Richmond County)
+
+```{r}
+boro <- sale["BOROUGH"]
+n_distinct(boro)
+```
+
+borough number is changed to a name accordingly.
+
+```{r}
+boro <- sapply(boro, function(l) {
+  ifelse(l == 1, "Manhattan", 
+         ifelse(l == 2, "Bronx",
+                ifelse(l == 3, "Brooklyn",
+                       ifelse(l == 4, "Queens", "Staten Island")
+                )
+         )
+  )
+})
+
+boro <- factor(boro)
+```
+
+collecting borough information
+
+```{r}
+dat <- dat %>% mutate(boro = boro)
+```
+
+**table for the distribution**
+
+```{r}
+tab <- dat %>% count(boro) 
+tab %>% kable()
+```
+
+**"NEIGHBORHOOD"** : neighborhodd name, chr --> neigh
+
+```{r}
+neigh <- as.matrix(sale["NEIGHBORHOOD"])
+n_distinct(neigh)
+neigh <- factor(neigh)
+```
+
+In neighorhood, 254 categories exist.
+Thus, a histogram may be easier than a table. 
+
+```{r}
+dat <- dat %>% mutate(neigh = neigh)
+
+dat %>%
+  count(neigh) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Neighborhood")
+```
+
+**"BUILDING CLASS CATEGORY"** : what kind of property, chr -> b_cat
+
+```{r}
+b_cat <- as.matrix(sale["BUILDING CLASS CATEGORY"])
+n_distinct(b_cat)
+b_cat <- factor(b_cat)
+```
+
+collecting b_cat & distribution table
+
+```{r}
+dat <- dat %>% mutate(b_cat = b_cat)
+tab <- dat %>% count(b_cat)
+tab %>% kable()
+```
+
+**"TAX CLASS AT PRESENT"** : tax category, chr -> tax_c_a_p
+
+```{r}
+tax_c_a_p <- as.matrix(sale["TAX CLASS AT PRESENT"])
+n_distinct(tax_c_a_p)
+tax_c_a_p <- tax_c_a_p
+```
+
+collecting tax_c_a_p & distribution table
+
+```{r}
+dat <- dat %>% mutate(tax_c_a_p = tax_c_a_p)
+tab <- dat %>% count(tax_c_a_p)
+tabtax <- tab
+tab %>% kable()
+```
+
+**Tax class** has four categories. But there are NA and sub-categories in tax_c_a_p. sub categories will be merged and NA should be removed. this is done after collecting all the variables.
+
+**"BLOCK"** : double -> block
+
+```{r}
+block <- as.matrix(sale["BLOCK"])
+
+n_distinct(block)
+```
+
+block has 11566, which is over the number of price unique values. Thus, block won't be used in predicton.
+
+**"LOT"** : double -> lot
+
+```{r}
+lot <- as.matrix(sale["LOT"])
+n_distinct(lot)
+lot <- as.numeric(lot)
+```
+
+In lot, 2627 categories exist.
+Thus, a histogram may be easier than a table. 
+
+```{r}
+datx <- dat %>% mutate(lot = lot)
+
+datx %>%
+  count(lot) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Lot")
+```
+
+**"BUILDING CLASS AT PRESENT"** : chr --> b_c_a_p
+
+```{r}
+b_c_a_p <- as.matrix(sale["BUILDING CLASS AT PRESENT"])
+n_distinct(b_c_a_p)
+b_c_a_p <- factor(b_c_a_p)
+```
+
+In lot, 167 categories exist. Thus, a histogram may be easier than a table. 
+
+```{r}
+dat <- dat %>% mutate(b_c_a_p = b_c_a_p)
+
+dat %>%
+  count(b_c_a_p) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Building Class at Present")
+```
+
+**"ADDRESS"** : chr --> address                     
+
+```{r}
+address <- as.matrix(sale["ADDRESS"])
+
+n_distinct(address)
+```
+
+address has 67563, which is over price unique value. Thus, address won't be used in predicton.
+
+**"APARTMENT NUMBER"** : chr
+Because address is discarded, apartment number is useless.
+
+**"ZIP CODE"** : double  --> zip
+
+```{r}
+zip <- as.matrix(sale["ZIP CODE"])
+
+n_distinct(zip)
+
+zip <- factor(zip)
+```
+
+In zip code case, 186 categories exist. Thus, a histogram may be easier than a table. 
+
+```{r}
+dat <- dat %>% mutate(zip = zip)
+
+dat %>%
+  count(zip) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Zip code")
+```
+
+**"RESIDENTIAL UNITS"** : double  --> resi
+
+```{r}
+resi <- as.matrix(sale["RESIDENTIAL UNITS"])
+
+n_distinct(resi)
+
+resi <- factor(resi)
+```
+
+In residential unit case, 176 categories exist. Thus, a histogram may be easier than a table. 
+
+```{r}
+dat <- dat %>% mutate(resi = resi)
+
+dat %>%
+  count(resi) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Residential Units")
+```
+
+**"COMMERCIAL UNITS"** : double --> comm
+
+```{r}
+comm <- as.matrix(sale["COMMERCIAL UNITS"])
+n_distinct(comm)
+comm <- factor(comm)
+```
+
+In commerical unit case, 55 categories exist.
+
+```{r}
+dat <- dat %>% mutate(comm = comm)
+tab <- dat %>% count(comm) 
+tab %>% kable()
+```
+
+**"TOTAL UNITS"** : double -> tot
+
+```{r}
+tot <- as.matrix(sale["TOTAL UNITS"])
+n_distinct(tot)
+tot <- factor(tot)
+```
+
+In total unit case, 192 categories exist. Thus, a histogram may be easier than a table. 
+
+```{r}
+dat <- dat %>% mutate(tot = tot)
+
+dat %>%
+  count(tot) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Total Units")
+```
+
+**"LAND SQUARE FEET"** : chr --> l_sqf
+
+```{r}
+l_sqf <- as.matrix(sale["LAND SQUARE FEET"])
+
+n_distinct(l_sqf)
+```
+
+Land Square feet has 6062 unique values, which is more than a half of price unique values. Thus, not used. However, one can round the numbers.
+
+```{r}
+l_sqf <- as.numeric(l_sqf)
+l_sqf <- round(l_sqf, digits = -3)
+
+n_distinct(l_sqf)
+```
+
+unique number is reduced to 170. Thus, a histogram may be easier than a table. 
+
+```{r}
+datx <- dat %>% mutate(l_sqf = l_sqf)
+
+datx %>%
+  count(l_sqf) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Land Feet")
+```
+
+NA is replaced with the average.
+
+```{r}
+ml_sqf = mean(l_sqf, na.rm = T)
+
+l_sqf <- sapply(l_sqf, function(l) {
+  ifelse(!is.na(l), l, ml_sqf)
+})
+
+dat <- dat %>% mutate(l_sqf = l_sqf)
+```
+
+**"GROSS SQUARE FEET"** : chr --> g_sqrf
+
+```{r}
+g_sqrf <- as.matrix(sale["GROSS SQUARE FEET"])
+n_distinct(g_sqrf)
+```
+
+gross square feet has 5691 unique values, which is more than a half of price unique values. Thus, not used. however, one can round the numbers.
+
+```{r}
+g_sqrf <- as.numeric(g_sqrf)
+g_sqrf <- round(g_sqrf, digits = -3)
+
+n_distinct(g_sqrf)
+```
+
+unique number is 239
+
+NA is replaced with the average.
+
+```{r}
+mg_sqf = mean(g_sqrf, na.rm = T)
+
+g_sqrf <- sapply(g_sqrf, function(l) {
+  ifelse(!is.na(l), l, mg_sqf)
+})
+
+dat <- dat %>% mutate(g_sqrf = g_sqrf)
+```
+
+**"YEAR BUILT" **: double --> year_buit
+
+```{r}
+year_buit <- as.matrix(sale["YEAR BUILT"])
+
+n_distinct(year_buit)
+
+year_buit <- factor(year_buit)
+```
+
+In year built case, 158 categories exist. Thus, a histogram may be easier than a table. 
+
+```{r}
+dat <- dat %>% mutate(year_buit = year_buit)
+
+dat %>%
+  count(year_buit) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Year Built")
+```
+
+**"TAX CLASS AT TIME OF SALE"** : double --> t_c_a_s
+
+```{r}
+t_c_a_s <- as.matrix(sale["TAX CLASS AT TIME OF SALE"])
+n_distinct(t_c_a_s)
+t_c_a_s <- factor(as.character(t_c_a_s))
+```
+
+Tax class at the time of sale has 4 univque values. table is shown.
+
+```{r}
+dat <- dat %>% mutate(t_c_a_s = t_c_a_s)
+tab <- dat %>% count(t_c_a_s)
+tab %>% kable()
+```
+
+**"BUILDING CLASS AT TIME OF SALE"** : chr --> b_c_a_s
+
+```{r}
+b_c_a_s <- as.matrix(sale["BUILDING CLASS AT TIME OF SALE"])
+n_distinct(b_c_a_s)
+b_c_a_s <- factor(b_c_a_p)
+```
+
+In building class at the time of sale case, 166 categories exist. Thus, a histogram may be easier than a table. 
+
+```{R}
+dat <- dat %>% mutate(b_c_a_s = b_c_a_s)
+
+dat %>%
+  count(b_c_a_s) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Building Class at the time of Sale")
+```
+
+**checking the collection, dat.**
+
+```{r}
+names(dat)
+```
+
+Now, the tax class at present (tax_c_a_p) need to be modified. first remove NA and associated values.
+
+```{r}
+dat <- dat %>% filter(tax_c_a_p != "NA")
+```
+
+original table
+
+```{r}
+tabtax %>% kable()
+```
+
+table after removing NA
+
+```{r}
+tab <- dat %>% count(tax_c_a_p)
+tabtax <- tab
+tab %>% kable()
+```
+
+Now, combine 1A, 1B, and 1C to 1. 
+2A, 2B, and 2C to 2
+
+*table for comparison*
+
+```{r}
+dat$tax_c_a_p[dat$tax_c_a_p %in%  c("1A", "1B", "1C")] <- "1"
+#dat$tax_c_a_p[dat$tax_c_a_p == "1B"] <- "1"
+#dat$tax_c_a_p[dat$tax_c_a_p == "1C"] <- "1"
+dat$tax_c_a_p[dat$tax_c_a_p %in%  c("2A", "2B", "2C")] <- "2"
+#dat$tax_c_a_p[dat$tax_c_a_p == "2B"] <- "2"
+#dat$tax_c_a_p[dat$tax_c_a_p == "2C"] <- "2"
+
+tax_c_a_p <- as.numeric(dat$tax_c_a_p)
+tax_c_a_p <- as.character(tax_c_a_p)
+tax_c_a_p <- factor(tax_c_a_p)
+
+dat <- dat %>% select(price, boro, neigh, b_cat, b_c_a_p, 
+                      zip, resi, comm, tot, l_sqf, 
+                      g_sqrf, year_buit, t_c_a_s, b_c_a_s)
+
+dat <- dat %>% mutate(tax_c_a_p = tax_c_a_p)
+
+tab <- dat %>% count(tax_c_a_p)
+tabtax <- tab
+tab %>% kable()
+```
+
+**Final colled data checking
+
+```{r}
+str(dat)
+```
+
+**Correlation among variables**
+correlation correlation among parameters and between parameters and price. For this, polycor library is needed for the use of hetcor() because the data contains numeric and caterorical factor.
+
+Unfortunately, the hetcor() takes too long. Instead, I have used correlate(), which ignores non-numeric parameters for the correlation coefficiency calculation.
+
+```{r, message=FALSE}
+library(lsr)
+```
+
+```{r}
+x <- correlate(dat)
+x
+```
+
+**Final data check before predictors**
+
+```{}
+names(dat)
+dim(dat)
+```
+
+final dat has 83810 rows and 15 columns. column names are "price", "boro", "neigh", "b_cat", "b_c_a_p", "zip", "resi", "comm", "tot", "l_sqf","g_sqrf", "year_buit", "t_c_a_s", "b_c_a_s", "tax_c_a_p".
+
+
+### Generating trainset and testset for predictors.
+
+with a laptop computer, predictors are extremely slow.
+In order to check the validity, 1000 data are sampled from dat and named dats.
+
+```{r, warning=FALSE}
+set.seed(1, sample.kind = "Rounding")
+```
+
+```{r}
+dat_index <- sample(seq_len(nrow(dat)), size = 1000)
+
+dats <- dat[dat_index,]
+```
+
+dats split for a hang-out test
+
+*load caret library*
+
+```{r}
+library(caret)
+```
+
+set random seed to 1
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+```
+
+split sale into two data sets, train and a hold-out test sets. 90% trainset and 10% testset
+
+```{r}
+test_index <- createDataPartition(y = dats$price, times = 1, p = 0.1, list = FALSE)
+
+trainset <- dats[-test_index,]
+testset <- dats[test_index,]
+```
+
+check the trainset and testset size
+
+```{r}
+nrow(trainset)
+nrow(testset)
+```
+
+trainset 75427 and testset 8383.
+
+short version 898 trainset 102 testset.
+
+ratio = 9 which is exactly what is expected (0.9/0.1 = 9).
+
+short version, ratio = 8.803922.
+
+### Average model
+
+In this model, one expects an average price.
+
+### regression tree model (rpart)
+
+The model minizes against muliple class variable using the following formula.
+
+$$
+\sum_{1:x,R_1(j,s)} (y_i - \hat{y_{R_1}})^2 + \sum_{1:x,R_2(j,s)} (y_i - \hat{y_{R_2}})^2 
+$$
+
+This is implemented in rpart package.
+
+### k-nearest neighbors (kNN) algorithm
+
+kNN method is based on conditional probability.
+
+$$
+p(x_1,x_2) = Pr(Y = 1 | X_1 = x_1, X_2 = x_2)
+$$
+
+This is calculated between two variabilities. Thus, it can be used for multiple classes. This algorithm is implemented in knn3 package.
+
+## Results
+
+### 1. Average Model
+
+```{r}
+mu <- mean(trainset$price)
+```
+
+Thurs, prediction; rating is expected to be average for all.
+
+```{r}
+predictions <- rep(mu, nrow(testset))
+```
+
+**scatterplot prediction and actual**
+
+```{r}
+data.frame(predition = predictions, actual = testset$price) %>%
+ggplot(aes(predition, actual)) +
+geom_point()
+```
+
+rmse from average
+
+```{r}
+naive_rmse <- RMSE(predictions, testset$rating)
+```
+
+storing the rmse to rmse_results
+
+```{r}
+rmse_results <- data_frame(method = "Just the average", RMSE = naive_rmse)
+```
+
+*table for rmse*
+
+```{r}
+rmse_results %>% kable()
+```
+
+**Regress tree model and k-nearst neighbor algorythm**
+
+Since the calculation of these methods is slow even if smaller data, parallel computing is implemented.
+
+How many cores in computer
+
+```{r}
+library(parallel)
+
+detectCores()
+```
+
+My computer has 4 cores.
+
+**caret package parallel computing**
+
+```{r}
+library(doParallel)
+```
+
+*start of parallel computing*
+
+```{r}
+rt_f <- makePSOCKcluster(4)
+registerDoParallel(rt_f)
+```
+
+### 2. Predictor using rpart method
+
+```{r}
+
+fit_rt <- train(price ~ ., method = "rpart",
+                tuneGrid = data.frame(cp = seq(0.0, 0.1, len = 25)),
+                data = trainset)
+```
+
+When the calculation is finished. close the parallel computing
+
+```{r}
+stopCluster(rt_f)
+```
+
+*plot optimization*
+
+```{r}
+ggplot(fit_rt)
+```
+
+*predicting price*
+
+```{r}
+y_hat_rt <- predict(fit_rt, testset)
+```
+
+*plot of prediction and actual price data.*
+
+```{r}
+data.frame(prediction = y_hat_rt, actual = testset$price) %>%
+  ggplot(aes(prediction, actual)) +
+  geom_point()
+```
+
+*calcuate rmse*
+
+```{r}
+rmse_rt <- RMSE(y_hat_rt, testset$price)
+```
+
+*store rmse*
+
+```{r}
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="rpart",
+                                     RMSE = rmse_rt ))
+```
+
+*print table for RMSE*
+
+```{r}
+rmse_results %>% kable()
+```
+
+### 3. knn3 parameter optimization
+
+```{r}
+control <- trainControl(method = "cv", number = 10, p = .9)
+
+# starting parallel computing
+
+knn_f <- makePSOCKcluster(4)
+registerDoParallel(knn_f)
+
+# Predictor using knn3
+
+fit_knn <- train(price ~ . , method = "knn", 
+                 tuneGrid = data.frame(k = c(1,3,5,7)),
+                 trControl = control,
+                 data = trainset)
+
+## When the calculation is finished.
+stopCluster(knn_f)
+
+ggplot(fit_knn)
+
+# predicting price 
+y_hat_knn <- predict(fit_knn, testset)
+
+# plot of prediction and actual price
+data.frame(prediction = y_hat_rt, actual = testset$price) %>%
+  ggplot(aes(prediction, actual)) +
+  geom_point()
+
+# calculate rmse
+rmse_knn <- RMSE(y_hat_knn, testset$price)
+
+# store rmse
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="knn",
+                                     RMSE = rmse_knn ))
+
+# print table for RMSE
+
+rmse_results %>% kable()
+```
+
+## Conclusion
+
+rpart and knn3 algorythm works fine. Pricing based on other factors is significant to economics. Thus, the starting of the price predictor is quite important. However, with my current implementation, RMSE (912810 and 863218 for rpart and knn3, respectively) and predicted value are quite different from the actual value. Thus, the predictor is not even close to a half way of being perfect. This results may be due to data size because the computational power limits me to subsetting the data. Furthermore, compared to movielens, the data for NYC real estate is still small.
+
+**Limitation**
+
+*Below is only limited to my implementation.*
+
+The algorythms are slow and thus, multiple cpu computer are necessary. Furthermore, the caret parallel computing package only uses CPU based. CPU is optimized for the sequential event. GPU is better fit for the parallel computing than CPU. Thus, GPU based parallel computing may be better.
+
+**Future work**
+
+Other methods, such as randomnforest, and GPU based parallel computing can be implemented.
+
+
